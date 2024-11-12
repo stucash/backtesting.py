@@ -518,6 +518,297 @@ class TestStrategy(TestCase):
         stats = self._Backtest(coroutine).run()
         self.assertEqual(list(stats._trades.Tag), [1, 1, 2])
 
+class TestSlippage(TestCase):
+    def setUp(self):
+        self.data = GOOG.iloc[:100]
+
+    def test_basic_backtest_with_slippage(self):
+        """Test basic strategy with different slippage settings"""
+
+        class BuyAndHold(Strategy):
+            def init(self):
+                pass
+
+            def next(self):
+                if not self.position:
+                    self.buy()
+
+        # Baseline without slippage
+        bt = Backtest(self.data, BuyAndHold)
+        stats_no_slip = bt.run()
+
+        # Test with fixed slippage
+        bt_fixed = Backtest(self.data, BuyAndHold, fixed_slippage=0.01)
+        stats_fixed = bt_fixed.run()
+
+        # Fixed slippage should reduce returns
+        self.assertLess(stats_fixed['Return [%]'], stats_no_slip['Return [%]'])
+
+        # Test with percentage slippage
+        bt_pct = Backtest(self.data, BuyAndHold, percentage_slippage=0.001)
+        stats_pct = bt_pct.run()
+
+        # Percentage slippage should reduce returns
+        self.assertLess(stats_pct['Return [%]'], stats_no_slip['Return [%]'])
+
+    def test_volume_impact(self):
+        """Test impact of volume-based slippage"""
+
+        class TestStrategy(Strategy):
+            def init(self):
+                pass
+
+            def next(self):
+                if not self.trades:
+                    # Use smaller, fixed sizes that we know can execute
+                    self.buy(size=100)  # Large trade
+                    self.buy(size=10)  # Small trade
+
+        # Use larger initial cash to ensure trades can execute
+        bt = Backtest(
+            self.data,
+            TestStrategy,
+            cash=1_000_000,  # Large enough cash to handle trades
+            volume_slippage=0.01
+        )
+        stats = bt.run()
+        trades = stats['_trades']
+
+        # Verify we have both trades
+        self.assertEqual(len(trades), 2)
+        large_trade = trades[trades.Size == 100].iloc[0]
+        small_trade = trades[trades.Size == 10].iloc[0]
+
+        # Since both trades happen at the same bar, same base price
+        # The larger trade should have more slippage and thus a higher entry price
+        self.assertGreater(large_trade.EntryPrice, small_trade.EntryPrice)
+
+    def test_spread_impact(self):
+        """Test impact of bid-ask spread"""
+
+        class InOutStrategy(Strategy):
+            def init(self):
+                pass
+
+            def next(self):
+                if not self.position:
+                    self.buy()
+                else:
+                    self.position.close()
+
+        # Compare performance with and without spread
+        bt_no_spread = Backtest(self.data, InOutStrategy)
+        stats_no_spread = bt_no_spread.run()
+
+        bt_spread = Backtest(self.data, InOutStrategy, spread=0.001)
+        stats_spread = bt_spread.run()
+
+        # Strategy with spread should perform worse
+        self.assertLess(stats_spread['Return [%]'], stats_no_spread['Return [%]'])
+
+    def test_multiple_slippage_components(self):
+        """Test combined effects of multiple slippage components"""
+
+        class SingleTradeStrategy(Strategy):
+            def init(self):
+                pass
+
+            def next(self):
+                if not self.position:
+                    self.buy()
+
+        # Test with all slippage components
+        bt_all = Backtest(
+            self.data,
+            SingleTradeStrategy,
+            fixed_slippage=0.01,
+            percentage_slippage=0.001,
+            volume_slippage=0.001,
+            spread=0.001
+        )
+        stats_all = bt_all.run()
+
+        # Compare with individual components
+        bt_fixed = Backtest(self.data, SingleTradeStrategy, fixed_slippage=0.01)
+        stats_fixed = bt_fixed.run()
+
+        bt_pct = Backtest(self.data, SingleTradeStrategy, percentage_slippage=0.001)
+        stats_pct = bt_pct.run()
+
+        # Combined slippage should have greater impact
+        self.assertLess(stats_all['Return [%]'], stats_fixed['Return [%]'])
+        self.assertLess(stats_all['Return [%]'], stats_pct['Return [%]'])
+
+    def test_zero_volume_handling(self):
+        """Test slippage behavior with zero volume bars"""
+
+        class ZeroVolumeTrader(Strategy):
+            def init(self):
+                pass
+
+            def next(self):
+                if not self.position and self.data.Volume[-1] == 0:
+                    self.buy()
+
+        # Create test data with zero volume bars
+        data = self.data.copy()
+        data.loc[data.index[10:15], 'Volume'] = 0
+
+        # Should handle zero volume without errors
+        bt = Backtest(data, ZeroVolumeTrader, volume_slippage=0.001)
+        stats = bt.run()
+        self.assertTrue(len(stats['_trades']) > 0)
+
+    def test_slippage_direction(self):
+        """Test slippage affects buys and sells correctly"""
+
+        class TestStrategy(Strategy):
+            def init(self):
+                self.has_traded = False
+
+            def next(self):
+                if not self.has_traded:
+                    self.buy()
+                    self.position.close()
+                    self.has_traded = True
+
+        bt = Backtest(
+            self.data,
+            TestStrategy,
+            cash=100_000,
+            percentage_slippage=0.001
+        )
+        stats = bt.run()
+        trades = stats._trades
+
+        self.assertEqual(len(trades), 1, "Expected exactly one trade with entry and exit")
+        trade = trades.iloc[0]
+
+        # Get the base prices at entry and exit
+        entry_bar_price = self.data.Close[trade.EntryBar]
+        exit_bar_price = self.data.Close[trade.ExitBar]
+
+        # Verify slippage effects:
+        # - Entry (buy) price should be higher than the base price
+        # - Exit (sell) price should be lower than the base price
+        self.assertGreater(trade.EntryPrice, entry_bar_price,
+                           "Buy price should be higher due to slippage")
+        self.assertLess(trade.ExitPrice, exit_bar_price,
+                        "Sell price should be lower due to slippage")
+
+    def test_slippage_calculation(self):
+        """Test exact price adjustments with different slippage and commission combinations"""
+
+        class TestStrategy(Strategy):
+            def init(self):
+                self.has_traded = False
+
+            def next(self):
+                if not self.has_traded:
+                    self.entry_price = self.data.Close[-1]
+                    self.buy(size=100)
+                    self.has_traded = True
+
+        # Test cases with different parameter combinations
+        test_params = [
+            # (commission, percentage_slip, volume_slip, spread)
+            (0.002, 0.001, 0, 0),  # Base case: commission + percentage slip
+            (0, 0.001, 0, 0),  # Only percentage slippage
+            (0.002, 0, 0, 0),  # Only commission
+            (0, 0, 0.001, 0),  # Only volume-based slippage
+            (0, 0, 0, 0.001),  # Only spread
+            (0.002, 0.001, 0.001, 0),  # Commission + percentage + volume slippage
+            (0.002, 0.001, 0.001, 0.001)  # All components
+        ]
+
+        results = []
+        for commission, pct_slip, vol_slip, spread in test_params:
+            bt = Backtest(
+                self.data,
+                TestStrategy,
+                cash=100_000,
+                commission=commission,
+                percentage_slippage=pct_slip,
+                volume_slippage=vol_slip,
+                spread=spread
+            )
+            stats = bt.run()
+
+            trade = stats._trades.iloc[0]
+            base_price = stats._strategy.entry_price
+            price_impact = (trade.EntryPrice - base_price) / base_price
+
+            results.append({
+                'params': f"comm={commission:.4%}, pct_slip={pct_slip:.4%}, vol_slip={vol_slip:.4%}, spread={spread:.4%}",
+                'price_impact': price_impact,
+                'base_price': base_price,
+                'trade_price': trade.EntryPrice
+            })
+
+            print(f"\nTest case: {results[-1]['params']}")
+            print(f"Base price: {base_price:.4f}")
+            print(f"Trade price: {trade.EntryPrice:.4f}")
+            print(f"Price impact: {price_impact:.4%}")
+
+            # Verify fundamental properties for each case
+            self.assertGreater(trade.EntryPrice, base_price,
+                               "Buy price should be higher than base price")
+
+            # Calculate minimum expected impact from parameters
+            min_impact = commission + pct_slip + spread / 2
+            if vol_slip > 0:
+                vol_impact = vol_slip * (trade.Size / stats._strategy.data.Volume[-1])
+                min_impact += vol_impact
+
+            self.assertGreater(price_impact, min_impact,
+                               "Price impact should be greater than minimum expected impact")
+
+            # Verify impact stays within reasonable bounds
+            self.assertLess(price_impact, 0.03,
+                            "Price impact should not exceed 3%")
+
+        # Case with all components should have highest impact
+        all_impacts = [r['price_impact'] for r in results]
+        self.assertEqual(max(all_impacts), all_impacts[6],
+                         "Combined components should have highest impact")
+
+        # Print ordered results for analysis
+        print("\nOrdered results by impact:")
+        for r in sorted(results, key=lambda x: x['price_impact']):
+            print(f"{r['params']}: {r['price_impact']:.4%}")
+
+    def test_slippage_parameter_validation(self):
+        """Test validation of slippage parameters in actual trading"""
+
+        class SingleTradeStrategy(Strategy):
+            def init(self):
+                pass
+
+            def next(self):
+                if not self.position:
+                    self.buy()
+
+        # Test that execution with valid parameters works
+        bt = Backtest(self.data, SingleTradeStrategy,
+                      percentage_slippage=0.001,
+                      spread=0.001,
+                      volume_slippage=0.001)
+        stats = bt.run()
+        self.assertTrue(len(stats['_trades']) > 0)
+
+        # Test that trades execute at expected prices
+        bt_no_slip = Backtest(self.data, SingleTradeStrategy)
+        stats_no_slip = bt_no_slip.run()
+
+        bt_with_slip = Backtest(self.data, SingleTradeStrategy, percentage_slippage=0.001)
+        stats_with_slip = bt_with_slip.run()
+
+        # Verify slippage is actually affecting prices
+        first_trade_no_slip = stats_no_slip._trades.iloc[0]
+        first_trade_with_slip = stats_with_slip._trades.iloc[0]
+
+        self.assertNotEqual(first_trade_no_slip.EntryPrice, first_trade_with_slip.EntryPrice)
+        self.assertGreater(first_trade_with_slip.EntryPrice, first_trade_no_slip.EntryPrice)
 
 class TestOptimize(TestCase):
     def test_optimize(self):
