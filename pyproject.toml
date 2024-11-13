@@ -1,38 +1,58 @@
-[tool.ruff]
-exclude = [
-    '.git',
-    '.eggs',
-    '__pycache__',
-    'doc/examples',
+[tool.poetry]
+name = "backtesting-py"
+version = "0.3.3.1"
+description = "super charged backtesting.py derivation"
+authors = ["kernc, qiuxiao"]
+readme = "README.md"
+repository = "https://github.com/kernc/backtesting.py"
+documentation = "https://kernc.github.io/backtesting.py/doc/backtesting/#gsc.tab=0"
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.7",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Intended Audience :: Financial and Insurance Industry",
+    "Intended Audience :: Science/Research",
+    "Topic :: Office/Business :: Financial :: Investment",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Operating System :: OS Independent",
 ]
-ignore = [
-    'UP006',
-    'UP007',
-    'UP009',
-    'N802',
-    'N806',
-    'C901',
-    'B008',
-    'B011',
-    'RUF002',
-]
-line-length = 100
-select = [
-    'I',
-    'E',
-    'F',
-    'W',
-    'UP',
-    'N',
-    'C',
-    'B',
-    'T',
-    'RUF',
-    'YTT',
-]
+packages = [{ include = "backtesting" }]
 
-[tool.ruff.pep8-naming]
-ignore-names = [
-    'l',
-    'h',
-]
+[tool.poetry.dependencies]
+python = "^3.9"
+numpy = "^1.22.0"
+pandas = ">=1.0.0, <3.0.0"
+bokeh = "^2.4.0"
+scikit-optimize = {version = "^0.9.0", optional = true}
+pdoc3 = {version = "^0.9.0", optional = true}
+matplotlib = "^3.9.2"
+seaborn = "^0.13.2"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^6.0"
+pytest-cov = "^2.0"
+flake8 = "^3.9.0"
+mypy = "^0.900"
+
+[tool.poetry.extras]
+optimize = ["scikit-optimize"]
+docs = ["pdoc3"]
+
+[tool.pytest.ini_options]
+addopts = "--cov=backtesting --cov-report=term-missing"
+testpaths = ["backtesting/test"]
+
+[tool.mypy]
+strict = true
+warn_unused_configs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_unreachable = true
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

@@ -523,6 +523,83 @@ class Order:
         return bool(self.__parent_trade)
 
 
+class SlippageModel:
+    """
+    Slippage model to simulate execution costs and price impact.
+    """
+
+    def __init__(self,
+                 fixed: float = 0.0,
+                 percentage: float = 0.0,
+                 volume_percentage: float = 0.0,
+                 spread: float = 0.0,
+                 custom_model: Optional[Callable] = None):
+        """
+        Initialize slippage model.
+
+        Parameters:
+        -----------
+        fixed : float
+            Fixed slippage amount added/subtracted from each trade price
+        percentage : float
+            Percentage of price added as slippage (e.g. 0.0001 for 0.01%)
+        volume_percentage: float
+            Additional percentage slippage per unit of volume
+        spread : float
+            Bid-ask spread as percentage of price
+        custom_model : Callable
+            Custom slippage function taking (price, size, volume) and returning adjusted price
+        """
+        self.fixed = fixed
+        self.percentage = percentage
+        self.volume_percentage = volume_percentage
+        self.spread = spread
+        self.custom_model = custom_model
+
+    def slippage_adjusted_price(self, price: float, trade_size: float, volume: float) -> float:
+        """
+        Calculate slippage-adjusted price for a trade.
+
+        Parameters:
+        -----------
+        price : float
+            Original trade price
+        size : float
+            Trade size (positive for buys, negative for sells)
+        volume : float
+            Current market volume
+
+        Returns:
+        --------
+        float
+            Slippage-adjusted price
+        """
+        # Direction of slippage (buys pay more, sells receive less)
+        direction = np.sign(trade_size)
+
+        # Calculate each slippage component
+        fixed_slip = self.fixed * direction
+        percentage_slip = price * self.percentage * direction
+
+        # Volume-based slippage increases with size relative to volume
+        if volume > 0:
+            volume_slip = price * self.volume_percentage * (abs(trade_size) / volume) * direction
+        else:
+            volume_slip = 0
+
+        # Spread-based slippage
+        spread_slip = price * (self.spread / 2) * direction
+
+        # Sum all slippage components
+        total_slip = fixed_slip + percentage_slip + volume_slip + spread_slip
+
+        # Apply custom model if provided
+        if self.custom_model is not None:
+            return self.custom_model(price, trade_size, volume)
+
+        return price + total_slip
+
+
 class Trade:
     """
     When an `Order` is filled, it results in an active `Trade`.
@@ -698,7 +775,7 @@ class Trade:
 
 
 class _Broker:
-    def __init__(self, *, data, cash, commission, margin,
+    def __init__(self, *, data, cash, commission, margin, slippage,
                  trade_on_close, hedging, exclusive_orders, index):
         assert 0 < cash, f"cash should be >0, is {cash}"
         assert -.1 <= commission < .1, \
@@ -712,6 +789,7 @@ class _Broker:
         self._trade_on_close = trade_on_close
         self._hedging = hedging
         self._exclusive_orders = exclusive_orders
+        self._slippage = slippage
 
         self._equity = np.tile(np.nan, len(index))
         self.orders: List[Order] = []
@@ -780,10 +858,22 @@ class _Broker:
 
     def _adjusted_price(self, size=None, price=None) -> float:
         """
-        Long/short `price`, adjusted for commisions.
+        Long/short `price`, adjusted for commisions and slippage.
         In long positions, the adjusted price is a fraction higher, and vice versa.
         """
-        return (price or self.last_price) * (1 + copysign(self._commission, size))
+        price = price or self.last_price
+        commission_adjusted_price = price * (1 + copysign(self._commission, size))
+
+        if size is not None and self._slippage:
+            volume = self._data.Volume[-1]
+            price = self._slippage.slippage_adjusted_price(
+                price=commission_adjusted_price,
+                trade_size=size,
+                volume=volume
+            )
+            return price
+
+        return commission_adjusted_price
 
     @property
     def equity(self) -> float:
@@ -1030,7 +1120,11 @@ class Backtest:
                  margin: float = 1.,
                  trade_on_close=False,
                  hedging=False,
-                 exclusive_orders=False
+                 exclusive_orders=False,
+                 fixed_slippage: float = 0.0,
+                 percentage_slippage: float = 0.0,
+                 volume_slippage: float = 0.0,
+                 spread: float = 0.0
                  ):
         """
         Initialize a backtest. Requires data and a strategy to test.
@@ -1075,6 +1169,18 @@ class Backtest:
         trade/position, making at most a single trade (long or short) in effect
         at each time.
 
+        fixed_slippage : float
+            Fixed slippage amount added/subtracted from each trade price
+
+        percentage_slippage : float
+            Percentage of price added as slippage (e.g. 0.0001 for 0.01%)
+
+        volume_slippage : float
+            Additional percentage slippage per unit of volume
+
+        spread : float
+            Bid-ask spread as percentage of price
+
         [FIFO]: https://www.investopedia.com/terms/n/nfa-compliance-rule-2-43b.asp
         """
 
@@ -1087,6 +1193,15 @@ class Backtest:
                             'entry order price')
 
         data = data.copy(deep=False)
+
+        slippage = None
+        if any([fixed_slippage, percentage_slippage, volume_slippage, spread]):
+            slippage = SlippageModel(
+                fixed=fixed_slippage,
+                percentage=percentage_slippage,
+                volume_percentage=volume_slippage,
+                spread=spread
+            )
 
         # Convert index to datetime index
         if (not isinstance(data.index, pd.DatetimeIndex) and
@@ -1130,6 +1245,7 @@ class Backtest:
             _Broker, cash=cash, commission=commission, margin=margin,
             trade_on_close=trade_on_close, hedging=hedging,
             exclusive_orders=exclusive_orders, index=data.index,
+            slippage=slippage
         )
         self._strategy = strategy
         self._results: Optional[pd.Series] = None
@@ -1171,6 +1287,7 @@ class Backtest:
             Kelly Criterion                        0.6134
             _strategy                            SmaCross
             _equity_curve                           Eq...
+            _interval_returns                  Returns...
             _trades                       Size  EntryB...
             dtype: object
 
@@ -1189,6 +1306,9 @@ class Backtest:
         data._update()  # Strategy.init might have changed/added to data.df
 
         # Indicators used in Strategy.next()
+        # TODO: indicator has to be of type Indicator in live env because the trader can't afford to
+        # TODO: lose out some indicators just because he failed to make it Indicator type.
+        # TODO: rather than a silent if filter, the incorrect indicators should fail before the construction.
         indicator_attrs = {attr: indicator
                            for attr, indicator in strategy.__dict__.items()
                            if isinstance(indicator, _Indicator)}.items()
