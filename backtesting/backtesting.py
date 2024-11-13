@@ -1189,6 +1189,9 @@ class Backtest:
         data._update()  # Strategy.init might have changed/added to data.df
 
         # Indicators used in Strategy.next()
+        # TODO: indicator has to be of type Indicator in live env because the trader can't afford to
+        # TODO: lose out some indicators just because he failed to make it Indicator type.
+        # TODO: rather than a silent if filter, the incorrect indicators should fail before the construction.
         indicator_attrs = {attr: indicator
                            for attr, indicator in strategy.__dict__.items()
                            if isinstance(indicator, _Indicator)}.items()

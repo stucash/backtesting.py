@@ -220,6 +220,83 @@ class TestBacktest(TestCase):
             stats = bt.run()
         self.assertEqual(stats['# Trades'], 145)
 
+    def test_interval_returns(self):
+        """Test interval returns calculation and accessibility"""
+
+        class BuyAndHold(Strategy):
+            def init(self):
+                pass
+
+            def next(self):
+                if not self.position:
+                    self.buy()
+
+        # Test with daily data
+        bt = Backtest(GOOG.iloc[:100], BuyAndHold)
+        stats = bt.run()
+
+        returns = stats['_interval_returns']
+        equity = stats._equity_curve.Equity
+
+        # Basic validation
+        self.assertIsInstance(returns, pd.Series)
+        self.assertEqual(len(returns), len(GOOG.iloc[:100]))
+
+        # Verify returns calculation
+        manual_returns = equity.pct_change().fillna(0)
+        manual_returns.name = returns.name  # Match the series name
+        pd.testing.assert_series_equal(returns, manual_returns)
+
+        # Verify no NaN values
+        self.assertFalse(returns.isnull().any(), "Should have no NaN values")
+
+        # Verify first value is 0
+        self.assertEqual(returns.iloc[0], 0, "First return should be 0")
+
+        # Test zero returns for no trades
+        class NoTrades(Strategy):
+            def init(self):
+                pass
+
+            def next(self):
+                pass
+
+        bt = Backtest(GOOG.iloc[:100], NoTrades)
+        stats = bt.run()
+        returns = stats['_interval_returns']
+        self.assertTrue((returns == 0).all(), "All returns should be zero")
+
+        # Test returns with a single trade
+        class SingleTrade(Strategy):
+            def init(self):
+                self.has_traded = False
+
+            def next(self):
+                if not self.has_traded:
+                    if len(self.data) == 50:  # Trade in middle of data
+                        self.buy()
+                        self.has_traded = True
+                    elif self.position and len(self.data) == 75:
+                        self.position.close()
+
+        bt = Backtest(GOOG.iloc[:100], SingleTrade)
+        stats = bt.run()
+        returns = stats['_interval_returns']
+
+        # Get trade entry and exit points
+        trade = stats._trades.iloc[0]
+        entry_idx = trade.EntryBar
+        exit_idx = trade.ExitBar
+
+        # Verify return patterns
+        self.assertEqual(returns[0], 0, "First return should be 0")
+        self.assertTrue((returns[:entry_idx] == 0).all(),
+                        "Returns before trade entry should be zero")
+        self.assertTrue((returns[exit_idx + 1:] == 0).all(),
+                        "Returns after trade exit should be zero")
+        self.assertTrue(any(returns[entry_idx:exit_idx + 1] != 0),
+                        "Should have some non-zero returns during trade")
+
     def test_broker_params(self):
         bt = Backtest(GOOG.iloc[:100], SmaCross,
                       cash=1000, commission=.01, margin=.1, trade_on_close=True)
