@@ -5,6 +5,10 @@ These were the major changes contributing to each release:
 
 ### 0.x.x
 
+### 0.3.3_1
+* Added slippage model to the core backtest
+* Exposed interval returns which resides on the equity curve, as part of the result.
+* Skipped test for scikit-optimize as the package has been abandoned, a new optimisatio engine should be used.
 
 ### 0.3.3
 (2021-12-13)
