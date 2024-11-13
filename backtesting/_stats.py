@@ -45,11 +45,15 @@ def compute_stats(
     dd = 1 - equity / np.maximum.accumulate(equity)
     dd_dur, dd_peaks = compute_drawdown_duration_peaks(pd.Series(dd, index=index))
 
-    equity_df = pd.DataFrame({
+    equity_df = pd.DataFrame(
+        data={
         'Equity': equity,
         'DrawdownPct': dd,
-        'DrawdownDuration': dd_dur},
-        index=index)
+        'DrawdownDuration': dd_dur,
+        'Returns': pd.Series(equity, index=index).pct_change().fillna(0.0)
+        },
+        index=index
+    )
 
     if isinstance(trades, pd.DataFrame):
         trades_df: pd.DataFrame = trades
@@ -143,6 +147,7 @@ def compute_stats(
 
     s.loc['_strategy'] = strategy_instance
     s.loc['_equity_curve'] = equity_df
+    s.loc['_interval_returns'] = equity_df['Returns']
     s.loc['_trades'] = trades_df
 
     s = _Stats(s)
